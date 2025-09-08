@@ -1,0 +1,572 @@
+---
+title: "FIND_EBV"
+author: "Miguel Garcia"
+date: "2024-04-02"
+output: html_document
+---
+
+load libraries
+
+```{r include=FALSE}
+
+library(dplyr)
+library (ggplot2)
+library (tidyverse)
+library(ggthemes)
+library (ggpubr)
+library (readxl)#Needed to upload xlsx files
+library (gtsummary)
+```
+
+Import find ebv analysis
+
+```{r include=FALSE}
+ 
+ebv <- read_xlsx("/Users/miguelantoniogarciaknight/Documents/Projects/EBV_SCoV2/data/EBV_SARS_analysis.xlsx", 1)
+
+bl <- read_xlsx("/Users/miguelantoniogarciaknight/Library/CloudStorage/Box-Box/COVID FIND Data/Laboratory Derived Data/Andino Lab/qPCR, CPE and clinical data files/MasterDB_patientLevelData.xlsx", 1)
+
+serology <- read_xlsx("/Users/miguelantoniogarciaknight/Documents/Projects/EBV_SCoV2/doc/SerologyEBV_FIND_EBVab Results_formatEdit.xlsx")
+```
+
+Wrangle ebv dataframe
+
+```{r}
+ebv$cpe_pos_S <- as.numeric(ebv$cpe_pos_S)
+
+ebv <- ebv %>%
+  mutate(
+    cpe_pos_S = if_else(is.na(cpe_pos_S), 0, cpe_pos_S),
+    CPE_pos_confirm_N = if_else(is.na(CPE_pos_confirm_N), 0, CPE_pos_confirm_N),
+    PASC_type = if_else(is.na(PASC_type), "None", PASC_type)
+  )
+
+ebv$PatientID <- as.character(ebv$PatientID)
+ebv$CPE_pos_confirm_N <- as.logical(ebv$CPE_pos_confirm_N)
+ebv$cpe_pos_S <- as.logical(ebv$cpe_pos_S)
+ebv$PASC<- as.logical(ebv$PASC)
+ebv$copies_ebv <- as.integer(ebv$copies_ebv)
+ebv$day <- as.integer(ebv$day)
+
+
+ebv<- ebv %>% arrange (PatientID)
+
+#change NA values to 40 and 1 for ct and ebv_copies, respectively. Use plate ct cut offs to set to 1 values below cutoff
+ebv <- ebv %>%
+  mutate(
+    ct_ebv = if_else(is.na(ct_ebv), 40, ct_ebv),
+    copies_ebv = ifelse(is.na(copies_ebv), 1, copies_ebv),
+    copies_ebv = ifelse(ct_ebv > ebv_plate_cutoff, 1, copies_ebv),
+    copies_sars_S = if_else(is.na(copies_sars_S), 1, copies_sars_S),     
+    copies_sars_N = if_else(is.na(copies_sars_N), 1, copies_sars_N),
+  )
+
+```
+
+Wrangle serology dataframe
+
+```{r}
+
+serology <- serology %>%
+  mutate(
+    result = ifelse(grepl("^<", result), "0", result),  # replace values like "<0.2" with "0"
+    result = as.numeric(result)  # convert to numeric
+  )
+
+
+sero_wide <- serology %>%
+  pivot_wider(
+    id_cols = PatientID,
+    names_from = c(test, timepoint),
+    values_from = result
+  )
+
+
+sero_wide$PatientID <- as.character(sero_wide$PatientID)
+
+
+sero_wide <- sero_wide %>%
+  mutate(EADIgG_pos = (`EBV Antibody to Early (D) Antigen IgG_D28` > 10.9) |
+                      (`EBV Antibody to Early (D) Antigen IgG_M4` > 10.9))
+
+sero_wide <- sero_wide %>%
+  mutate(VCAIgM_pos = ( `EBV Antibody to Viral Capsid Antigen IgM_D28` > 43.9) |
+                      ( `EBV Antibody to Viral Capsid Antigen IgM_M4` > 43.9))
+  
+
+
+
+```
+
+Create intermediate dataframes by PatientID to summarise ebv_pos and peak_ebv
+
+```{r}
+
+ebv_sum <- ebv %>%
+  group_by(PatientID) %>%
+  summarise(
+    ebv_study = TRUE,
+    ebv_pos = any(copies_ebv > 500, na.rm = TRUE),
+    ebv_pos_two = sum(copies_ebv > 500, na.rm = TRUE) >= 2,
+    mean_ebvpos_samples = sum(copies_ebv > 1, na.rm = TRUE),
+    mean_ebvcopies = mean(copies_ebv[copies_ebv > 1], na.rm = TRUE),
+    max_copies_ebv = max(copies_ebv, na.rm = TRUE),
+    max_copies_sars_S = max(copies_sars_S, na.rm = TRUE),
+    max_copies_sars_N = max(copies_sars_N, na.rm = TRUE),
+    n_samples = n(),
+    PASC = first(na.omit(PASC)),
+    PASC_type = first(na.omit(PASC_type)),
+    cpe_pos_S = any(cpe_pos_S==TRUE)
+  )
+
+
+```
+
+Wrangle bl dataframe
+
+```{r}
+
+#coerce bl variables
+bl <- bl %>%
+  mutate(
+    PatientID = as.character(PatientID),
+    hh = as.character(hh),
+    index = as.logical(index),
+    infected = as.logical(infected),
+    anyvac = as.logical(anyvac),
+    twovac = as.logical(twovac),
+    oneboost = as.logical(oneboost),
+    twoboost = as.logical(twoboost),
+    bivboost = as.logical(bivboost),
+    hosp = ifelse(is.na(hosp), FALSE, hosp),
+    immunosup = as.logical(immunosup),
+    monoclonal = as.logical(monoclonal)
+  )
+
+#generate age and BMI categories
+bl %>% mutate (catage= cut (calcage, breaks= c(17, 29, 39, 49, 59, Inf), 
+              labels= c("18-29", "30-39", "40-49", "50-59", ">60" ))) ->bl
+
+bl <- mutate (bl, bmi = weight/ ((height)^2)*703 )
+bl %>% mutate (catbmi= cut (bmi, breaks= c(0, 24.9, 29.9, Inf), 
+              labels= c("under 24.9", "25-29.9", "30 or more" ))) ->bl
+
+bl <- mutate(bl, vax = ifelse(vax == "Full schedule", "Primary series", vax)) #rename 1ry series 
+
+bl <- mutate(bl, vaxGrouped = ifelse(vax %in% c("One booster", "Two boosters"), "Boosted", vax))
+
+length(unique(bl$PatientID)) 
+```
+
+Make EBV long table
+
+```{r}
+blEBVlong<- left_join (ebv, bl, by="PatientID")
+dim (blEBVlong)
+
+```
+
+Make EBV summary dataframe
+
+```{r}
+blEBV<- left_join (ebv_sum, bl, by="PatientID")
+
+blEBV<- left_join (blEBV, sero_wide, by="PatientID")
+```
+
+```{r}
+addmargins(table(
+  `EA-D IgG Positive` = blEBV$EADIgG_pos,
+  `EBV DNA Positive` = blEBV$ebv_pos
+))
+
+addmargins(table(
+  `EA-D IgG Positive` = blEBV$EADIgG_pos,
+  `PASC Positive` = blEBV$PASC
+))
+```
+
+```{r}
+
+blEBVlong %>%
+  filter(PASC == TRUE & infected == TRUE) %>%
+  ggplot(aes(x = day)) +
+  
+  # EBV line and points
+  geom_line(aes(y = copies_ebv, color = "EBV")) +
+  geom_point(aes(y = copies_ebv, color = "EBV"), size = 1) +
+  
+  # SARS-S line and points
+  geom_line(aes(y = copies_sars_S, color = "SARS-S")) +
+  geom_point(aes(y = copies_sars_S, color = "SARS-S"), size = 1) +
+
+  # SARS-N line and points
+  geom_line(aes(y = copies_sars_N, color = "SARS-N")) +
+  geom_point(aes(y = copies_sars_N, color = "SARS-N"), size = 1) +
+
+  # Dashed threshold line
+  geom_hline(yintercept = 2 * 10^2, linetype = "dashed", color = "black") +
+
+  # Overlay: special marker where cpe_pos_S == TRUE
+  geom_point(data = blEBVlong %>% filter(PASC == TRUE & infected == TRUE & cpe_pos_S == TRUE),
+             aes(x = day, y = copies_sars_S),
+             shape = 1,  # star shape
+             size = 2,
+             color = "black") +
+
+  facet_wrap(
+    ~ interaction(PatientID, PASC_type, sep = " - "),
+    labeller = as_labeller(function(x) x)
+  ) +
+  labs(
+    x = "Days",
+    y = "Target copies/reaction",
+    color = "Target"
+  ) +
+  scale_color_manual(values = c("EBV" = "blue", "SARS-S" = "red", "SARS-N" = "green")) +
+  scale_y_log10(
+    breaks = trans_breaks("log10", function(x) 10^x),
+    labels = trans_format("log10", math_format(10^.x))
+  ) +
+  theme_excel_new() +
+  theme(
+    axis.text.x = element_text(size = 8),
+    legend.position = "bottom",
+    strip.text = element_text(size = 9)
+  )
+
+blEBVlong %>%
+  filter(PASC == FALSE & infected == TRUE) %>%
+  ggplot(aes(x = day)) +
+  
+  # EBV line and points
+  geom_line(aes(y = copies_ebv, color = "EBV")) +
+  geom_point(aes(y = copies_ebv, color = "EBV"), size = 1) +
+  
+  # SARS-S line and points
+  geom_line(aes(y = copies_sars_S, color = "SARS-S")) +
+  geom_point(aes(y = copies_sars_S, color = "SARS-S"), size = 1) +
+
+  # SARS-N line and points
+  geom_line(aes(y = copies_sars_N, color = "SARS-N")) +
+  geom_point(aes(y = copies_sars_N, color = "SARS-N"), size = 1) +
+
+  # Dashed threshold line
+  geom_hline(yintercept = 2 * 10^2, linetype = "dashed", color = "black") +
+
+  # Overlay: special marker where cpe_pos_S == TRUE
+  geom_point(data = blEBVlong %>% filter(PASC == FALSE & infected == TRUE & cpe_pos_S == TRUE),
+             aes(x = day, y = copies_sars_S),
+             shape = 1,  # star shape
+             size = 2,
+             color = "black") +
+  facet_wrap(
+    ~ interaction(PatientID, PASC_type, sep = " - "),
+    labeller = as_labeller(function(x) x)
+  ) +
+  labs(
+    x = "Days",
+    y = "Target copies/reaction",
+    color = "Target"
+  ) +
+  scale_color_manual(values = c("EBV" = "blue", "SARS-S" = "red", "SARS-N" = "green")) +
+  scale_y_log10(
+    breaks = trans_breaks("log10", function(x) 10^x),
+    labels = trans_format("log10", math_format(10^.x))
+  ) +
+  theme_excel_new() +
+  theme(
+    axis.text.x = element_text(size = 8),
+    legend.position = "bottom",
+    strip.text = element_text(size = 9)
+  )
+
+blEBVlong %>%
+  filter(infected == TRUE & PASC==TRUE) %>%
+  ggplot(aes(x = day)) +
+  geom_line(aes(y = copies_ebv, color = "EBV")) +
+  geom_point(aes(y = copies_ebv, color = "EBV"), size = 1) +
+  geom_line(aes(y = copies_sars_S, color = "SARS-S")) +
+  geom_point(aes(y = copies_sars_S, color = "SARS-S"), size = 1) +
+  geom_line(aes(y = copies_sars_N, color = "SARS-N")) +
+  geom_point(aes(y = copies_sars_N, color = "SARS-N"), size = 1) +
+  geom_hline(yintercept = 2*10^2, linetype = "dashed", color = "black") +
+  facet_wrap(~ PatientID) +
+  labs(x = "Days", 
+       y = "Target copies/reaction",
+       color = "Target") +
+  scale_color_manual(values = c("EBV" = "blue", "SARS-S" = "red", "SARS-N" = "green")) +
+  scale_y_log10(
+    breaks = scales::trans_breaks("log10", function(x) 10^x),
+    labels = scales::trans_format("log10", scales::math_format(10^.x))
+  ) +
+  theme_excel_new() +
+  theme(
+    axis.text.x = element_text(size = 8),
+    legend.position = "bottom"
+  )
+
+blEBVlong %>%
+  filter(infected == TRUE & PASC==FALSE) %>%
+  ggplot(aes(x = day)) +
+  geom_line(aes(y = copies_ebv, color = "EBV")) +
+  geom_point(aes(y = copies_ebv, color = "EBV"), size = 1) +
+  geom_line(aes(y = copies_sars_S, color = "SARS-S")) +
+  geom_point(aes(y = copies_sars_S, color = "SARS-S"), size = 1) +
+  geom_line(aes(y = copies_sars_N, color = "SARS-N")) +
+  geom_point(aes(y = copies_sars_N, color = "SARS-N"), size = 1) +
+  geom_hline(yintercept = 2*10^2, linetype = "dashed", color = "black") +
+  facet_wrap(~ PatientID) +
+  labs(x = "Days", 
+       y = "Target copies/reaction",
+       color = "Target") +
+  scale_color_manual(values = c("EBV" = "blue", "SARS-S" = "red", "SARS-N" = "green")) +
+  scale_y_log10(
+    breaks = scales::trans_breaks("log10", function(x) 10^x),
+    labels = scales::trans_format("log10", scales::math_format(10^.x))
+  ) +
+  theme_excel_new() +
+  theme(
+    axis.text.x = element_text(size = 8),
+    legend.position = "bottom"
+  )
+
+blEBVlong %>%
+  filter(infected == FALSE) %>%
+  ggplot(aes(x = day)) +
+  geom_line(aes(y = copies_ebv, color = "EBV")) +
+  geom_point(aes(y = copies_ebv, color = "EBV"), size = 1) +
+  geom_line(aes(y = copies_sars_S, color = "SARS-S")) +
+  geom_point(aes(y = copies_sars_S, color = "SARS-S"), size = 1) +
+  geom_line(aes(y = copies_sars_N, color = "SARS-N")) +
+  geom_point(aes(y = copies_sars_N, color = "SARS-N"), size = 1) +
+  geom_hline(yintercept = 2*10^2, linetype = "dashed", color = "black") +
+  facet_wrap(~ PatientID) +
+  labs(x = "Days", 
+       y = "Target copies/reaction",
+       color = "Target") +
+  scale_color_manual(values = c("EBV" = "blue", "SARS-S" = "red", "SARS-N" = "green")) +
+  scale_y_log10(
+    breaks = scales::trans_breaks("log10", function(x) 10^x),
+    labels = scales::trans_format("log10", scales::math_format(10^.x))
+  ) +
+  theme_excel_new() +
+  theme(
+    axis.text.x = element_text(size = 8),
+    legend.position = "bottom"
+  )
+
+```
+
+tables
+
+```{r}
+
+library(gtsummary)
+library(gt)
+
+summary_table1 <- blEBV %>%
+  select(infected, calcage, gender, index, bmi, raceth, vax, n_samples, max_copies_ebv, 
+         ebv_pos, ebv_pos_two, mean_ebvpos_samples, mean_ebvcopies, EADIgG_pos, VCAIgM_pos) %>%
+  tbl_summary(
+    by = infected,
+    statistic = list(
+      all_continuous() ~ "{mean} ({sd})",
+      all_categorical() ~ "{n} ({p}%)"
+    ),
+    digits = all_continuous() ~ 1
+  ) %>%
+  add_n() %>%
+  modify_header(
+    label ~ "**Variable**",
+    stat_1 ~ "**SARS-CoV-2 Uninfected (N = {n})**",
+    stat_2 ~ "**SARS-CoV-2 Infected (N = {n})**"
+  ) %>%
+  bold_labels()
+
+# Display the table
+summary_table1
+
+# Convert to gt object
+gt_summary1<- as_gt(summary_table1)
+
+# Save as PDF
+#gtsave(gt_summary1, "/Users/miguelantoniogarciaknight/Documents/Projects/EBV_SCoV2/presentations/summary_table1.png")
+
+
+# Create summary table by group
+summary_table <- blEBV %>% filter(infected == TRUE) %>%
+  select(PASC, calcage, gender, PASC_type, index, bmi, raceth, VariantDiv, vax, max_copies_ebv, 
+         max_copies_sars_S, max_copies_sars_N, ebv_pos, ebv_pos_two, mean_ebvpos_samples, mean_ebvcopies, EADIgG_pos, VCAIgM_pos, cpe_pos_S) %>%
+  tbl_summary(
+    by = PASC,
+    statistic = list(all_continuous() ~ "{mean} ({sd})",
+                     all_categorical() ~ "{n} ({p}%)"),
+    digits = all_continuous() ~ 1
+  ) %>%
+  add_n() %>%
+  modify_header(
+    label ~ "**Variable**",
+    stat_1 ~ "**No PASC (N = {n})**",
+    stat_2 ~ "**PASC (N = {n})**"
+  ) %>%
+  #add_overall() %>%  # Optional: add overall column
+  bold_labels()
+
+# Print the table
+summary_table
+
+# Convert to gt object
+gt_summary1<- as_gt(summary_table)
+
+# Save as PDF
+#gtsave(gt_summary1, "/Users/miguelantoniogarciaknight/Documents/Projects/EBV_SCoV2/presentations/summary_table.png")
+```
+
+```{r}
+library(dplyr)
+library(ggplot2)
+
+# Step 1: Filter data
+blEBV_plot <- blEBV %>%
+  filter(infected == TRUE, max_copies_ebv>500, max_copies_sars_S >0)
+
+# Step 2: Compute correlations by PASC group
+cor_data <- blEBV_plot %>%
+  group_by(PASC) %>%
+  summarise(
+    r = cor(max_copies_ebv, max_copies_sars_S, method = "pearson", use = "complete.obs"),
+    p = cor.test(max_copies_ebv, max_copies_sars_S)$p.value,
+    .groups = "drop"
+  ) %>%
+  mutate(
+    label = paste0("r = ", round(r, 2), ", p = ", signif(p, 2))
+  )
+
+# Step 3: Base plot
+p <- ggplot(blEBV_plot, aes(x = max_copies_ebv, y = max_copies_sars_S, color = PASC)) +
+  geom_point(alpha = 0.7) +
+  geom_smooth(method = "lm", se = FALSE) +
+  scale_x_log10() +
+  scale_y_log10() +
+  labs(
+    title = "Log-Scale: Max EBV vs SARS-CoV-2 S Copies (Infected Only)",
+    x = "Max EBV Copies (log10)",
+    y = "Max SARS-CoV-2 S Copies (log10)",
+    color = "PASC Status"
+  ) +
+  theme_minimal()
+
+# Step 4: Add annotations for each group
+# You may need to adjust x/y position manually for each group depending on data ranges
+for (i in 1:nrow(cor_data)) {
+  p <- p + annotate(
+    "text",
+    x = 1e4,  # adjust based on your data scale
+    y = 1e8 / (i),  # stagger the annotations vertically
+    label = cor_data$label[i],
+    color = scales::hue_pal()(length(unique(blEBV_plot$PASC)))[i],
+    hjust = 0,
+    size = 4
+  )
+}
+
+# Step 5: Show the plot
+p
+
+```
+
+```{r}
+# Load necessary libraries
+library(dplyr)
+library(ggplot2)
+
+# Step 1: Filter data (no grouping)
+blEBV_plot <- blEBV %>%
+  filter(infected == TRUE, max_copies_ebv > 1, max_copies_sars_S > 1, VariantDiv!= "Delta", VariantDiv!= "PreVOC", VariantDiv!= "Alpha", VariantDiv!= "Epsilon" )
+
+# Step 2: Compute overall correlation (Pearson)
+cor_result <- cor.test(
+  blEBV_plot$max_copies_ebv,
+  blEBV_plot$max_copies_sars_S,
+  method = "pearson"
+)
+
+# Create label for annotation
+cor_label <- paste0("r = ", round(cor_result$estimate, 2),
+                    ", p = ", signif(cor_result$p.value, 3))
+
+# Step 3: Base plot with all data and single regression line
+p2 <- ggplot(blEBV_plot, aes(x = max_copies_ebv, y = max_copies_sars_S, color = PASC)) +
+  geom_point(alpha = 0.7) +
+  geom_smooth(method = "lm", se = FALSE, color = "black") +  # overall regression line
+  scale_x_log10() +
+  scale_y_log10() +
+  labs(
+    title = "Log-Scale: Max EBV vs SARS-CoV-2 S Copies (Infected Only)",
+    x = "Max EBV Copies (log10)",
+    y = "Max SARS-CoV-2 S Copies (log10)",
+    color = "PASC Status"
+  ) +
+  theme_minimal()
+
+# Step 4: Add single correlation annotation
+p2 <- p2 + annotate(
+  "text",
+  x = 1e4,    # adjust based on your data range
+  y = 1e8,    # adjust based on your data range
+  label = cor_label,
+  color = "black",
+  hjust = 0,
+  size = 4
+)
+
+# Step 5: Show the plot
+p2
+```
+
+```{r}
+library(ggplot2)
+library(dplyr)
+library(ggpubr)
+
+blEBV %>%
+  filter(max_copies_ebv >1) %>%
+  #filter(anyvac == TRUE) %>%
+  ggplot(aes(x = infected, y = max_copies_ebv)) +
+  geom_boxplot(outlier.shape = NA, width = 0.5, fill = "lightgray") +
+  geom_jitter(width = 0.2, alpha = 0.6, size = 2, color = "blue") +
+  scale_y_log10() +
+  stat_compare_means(
+    method = "t.test",
+    label.y.npc = "top",
+    label = "p.format"
+  ) +
+  labs(
+    title = "Max EBV Copies by Infection Status (EBV Positive Only)",
+    x = "Infected",
+    y = "Max EBV Copies (log10)"
+  ) +
+  theme_minimal()
+
+blEBV %>%
+  filter(max_copies_ebv >500) %>%
+  ggplot(aes(x = infected, y = mean_ebvpos_samples)) +
+  geom_boxplot(outlier.shape = NA, width = 0.5, fill = "lightgray") +
+  geom_jitter(width = 0.2, alpha = 0.6, size = 2, color = "blue") +
+  scale_y_log10() +
+  stat_compare_means(
+    method = "wilcox.test",
+    label.y.npc = "top",
+    label = "p.format"
+  ) +
+  labs(
+    title = "Number of EBV positive samples by infection status (EBV positive only)",
+    x = "Infected",
+    y = "EBV positive saliva samples"
+  ) +
+  theme_minimal()
+
+
+
+```
